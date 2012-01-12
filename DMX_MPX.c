@@ -19,6 +19,7 @@ _FBS(BWRP_OFF & BSS_OFF)			//boot protects disabled
 //RB15 Status
 #define LED_Status PORTBbits.RB15
 
+
 //Define constant values
 #define DAC_W_ADDRESS 0b11000000//Address + write bit for I2C DAC
 #define SYNC 0b0000000000		//Results in -10V sync pulse
