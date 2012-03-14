@@ -1,10 +1,13 @@
 #include <p24FV32KA304.h>
+#include <libpic30.h>
 
 void setup(void);
 void sendDAC(int value);
 void display(char character);
 void threeDigits(char first, unsigned int number);
 void twoDigits(char first, char second, unsigned int number);
+void writeEEPROM(unsigned int address, unsigned int data);
+unsigned int readEEPROM(unsigned int address);
 
 _FDS(DSWDTEN_OFF & DSBOREN_OFF)	//Deep Sleep Watchdog disabled, Deep sleep Zero-Power BOR Disabled
 _FICD(ICS_PGx2)					//ICD Pin on PGC2/PGD2
@@ -14,6 +17,11 @@ _FOSC(OSCIOFNC_OFF & POSCMOD_NONE) 	//CLKO disable, primary osc diabled
 _FOSCSEL(FNOSC_FRCPLL & SOSCSRC_DIG)	//Fast RC oscillator
 _FGS(GWRP_OFF & GSS0_OFF)			//Flash write protection disabled, no protection
 _FBS(BWRP_OFF & BSS_OFF)			//boot protects disabled
+
+//EEPROM setup
+__prog__ int  __attribute__((space(eedata), aligned(_EE_4WORDS))) 
+dat[4];
+_prog_addressT p;
 
 //Define pins
 //RC4 Status
@@ -41,8 +49,12 @@ _FBS(BWRP_OFF & BSS_OFF)			//boot protects disabled
 #define SYNC 0b0000000000		//Results in -10V sync pulse
 #define ZERO 0b0111111111		//DAC value for 0V output
 #define FULL 0b1111111111		//DAC value for 10V output
-#define MAX_CHANNEL 16				//Sets the max channel outputs
+//#define MAX_CHANNEL 16			//Sets the max channel outputs
 #define MAX_DMX 64
+
+//EEPROM addresses
+#define DMX_ADDRESS 0
+#define MPX_CHANNELS 1
 
 //Define global variables
 unsigned int DACvalue = 0;		//10bit value to be sent to the DAC
@@ -53,10 +65,11 @@ unsigned int DMXchannelCount = 0;//keeps track of DMX in channel
 unsigned char DMXdata[MAX_DMX+1];
 unsigned int breakZeros = 0, zeroState = 0;
 unsigned int dmxnew = 0, dmxcurrent = 0, dmxaddress = 1, dmxreceived = 0;
+unsigned int mpxchannels = 16;
 unsigned int idleHistory = 0;
 unsigned char menuState = 0, upState = 0, downState = 0;
 unsigned char menuTemp = 0, upTemp = 0, downTemp = 0;
-
+unsigned int DMXcheck = 0;
 //display variables
 unsigned int digitCount = 1;
 char digit1 = ' ', digit2 = ' ', digit3 = ' ', digit4 = ' ';
@@ -68,7 +81,7 @@ void __attribute__((interrupt, no_auto_psv)) _T1Interrupt (void)
 	LED_Status = ~LED_Status;
 	if(U1STAbits.RIDLE && (idleHistory > 2))
 	{
-		APOS = 0;
+		DMXcheck = 0;
 		idleHistory = 0;
 	}
 	else
@@ -98,7 +111,7 @@ void __attribute__((interrupt, no_auto_psv)) _T2Interrupt (void)
 	else if (stateMPX == 2)	//Sends next channel, then decides which sync pulse to go to depending on current Ch count
 	{
 		
-		if(channelOutCount < (MAX_CHANNEL))
+		if(channelOutCount < mpxchannels)
 		{
 			sendDAC(DMXdata[channelOutCount]*2+512);
 			channelOutCount++;
@@ -196,7 +209,7 @@ void __attribute__((interrupt, no_auto_psv)) _U1RXInterrupt (void)
 			
 			dmxnew = 1;
 		}
-		APOS = 1;
+		DMXcheck = 1;
 	}
 }
 
@@ -214,11 +227,11 @@ void __attribute__((interrupt, no_auto_psv)) _U1ErrInterrupt (void)
 	}
 	if(U1STAbits.FERR)
 	{
-		APOS = 0;
+		DMXcheck = 0;
 	}
 	if(U1STAbits.PERR)
 	{
-		APOS = 0;
+		DMXcheck = 0;
 	}
 }
 
@@ -319,8 +332,13 @@ void __attribute__((__interrupt__, no_auto_psv)) _T5Interrupt(void)
 }
 	
 int main()
-{
+{	
+	writeEEPROM(2, 0);//dummy write to init the program space in the write function
+	dmxaddress = readEEPROM(DMX_ADDRESS);
+	mpxchannels = readEEPROM(MPX_CHANNELS);
+	
 	setup();
+	threeDigits('A', dmxaddress);
 	while(1)
 	{	
 		if(dmxnew)
@@ -331,7 +349,7 @@ int main()
 			dmxcurrent = 0;
 			zeroState = 0;
 			_T3IE = 1;
-		}
+		}		
 		switch(mode)
 		{
 			case 0: //presently Address
@@ -339,6 +357,7 @@ int main()
 				{
 					mode = 1;
 					menuState = 0;
+					twoDigits('C', 'H', mpxchannels);
 				}
 				else if(upState)
 				{
@@ -348,14 +367,15 @@ int main()
 					}
 					else
 					{
-						dmxaddress = 0;
+						dmxaddress = 1;
 					}		
 					upState = 0;
 					threeDigits('A', dmxaddress);
+					writeEEPROM(DMX_ADDRESS, dmxaddress);
 				}
 				else if(downState)
 				{
-					if(dmxaddress > 0)
+					if(dmxaddress > 1)
 					{
 						dmxaddress--;
 					}
@@ -365,6 +385,7 @@ int main()
 					}		
 					downState = 0;
 					threeDigits('A', dmxaddress);
+					writeEEPROM(DMX_ADDRESS, dmxaddress);
 				}
 				break;
 			case 1: //presently # of channel set
@@ -372,32 +393,35 @@ int main()
 				{
 					mode = 0;
 					menuState = 0;
+					threeDigits('A', dmxaddress);
 				}
 				else if(upState)
 				{
-					if(dmxaddress < 64)
+					if(mpxchannels < 64)
 					{
-						dmxaddress++;
+						mpxchannels++;
 					}
 					else
 					{
-						dmxaddress = 0;
+						mpxchannels = 4;
 					}		
 					upState = 0;
-					twoDigits('C', 'H', dmxaddress);
+					twoDigits('C', 'H', mpxchannels);
+					writeEEPROM(MPX_CHANNELS, mpxchannels);
 				}
 				else if(downState)
 				{
-					if(dmxaddress > 0)
+					if(mpxchannels > 4)
 					{
-						dmxaddress--;
+						mpxchannels--;
 					}
 					else
 					{
-						dmxaddress = 64;
+						mpxchannels = 64;
 					}		
 					downState = 0;
-					twoDigits('C', 'H', dmxaddress);
+					twoDigits('C', 'H', mpxchannels);
+					writeEEPROM(MPX_CHANNELS, mpxchannels);
 				}
 				break;
 		}		
@@ -420,6 +444,7 @@ void setup()
 	CLKDIVbits.RCDIV = 0b000;
 	ANSA = 0;	//Set all analog ports to digital
 	ANSB = 0;
+	ANSC = 0;
 	//TRIS bit settings
 	TRISCbits.TRISC4 = 0;	//Sets LED_Status as output
 	
@@ -453,8 +478,9 @@ void setup()
 	CNPU3bits.CN32PUE = 1;
 	CNPU2bits.CN31PUE = 1;
 	CNPU1bits.CN10PUE = 1;
+	_CNIF = 0;
 	_CNIE = 1;
-	_CNIP = 0b010;
+//	_CNIP = 0b010;
 	
 	for(i=0; i<=(MAX_DMX); i++)
 	{
@@ -596,6 +622,13 @@ void display(char character)
 				break;
 		}
 	}
+	if(digitCount == 1)
+	{
+		if(DMXcheck)
+		{
+			PORTB &= 0xFFFB;
+		}
+	}		
 }
 
 void threeDigits(char first, unsigned int number)
@@ -641,4 +674,20 @@ void twoDigits(char first, char second, unsigned int number)
 		temp = number - (digit3*10);
 		digit4 = (char)(temp);
 	}
+}
+
+void writeEEPROM(unsigned int address, unsigned int data)
+{
+	_init_prog_address(p, dat);
+	_erase_eedata(p+(2*address), _EE_WORD);		/* erase the dat[] array */
+	_wait_eedata();							/* wait to complete */
+	_write_eedata_word(p+(2*address), data);	/* write a word to dat[0] */
+	_wait_eedata();
+}
+
+unsigned int readEEPROM(unsigned int address)
+{
+	unsigned int tempreturn;
+	tempreturn = dat[address];
+	return tempreturn;
 }
